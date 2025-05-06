@@ -1,5 +1,7 @@
 # Vulkan
 
+開発中、完成後更新
+
 directory
 ..\Dependency\Includes
 E:\VulkanSDK\1.4.309.0\Include
