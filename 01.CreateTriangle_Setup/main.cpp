@@ -5,6 +5,7 @@
 #include <stdexcept>
 #include <cstdlib>
 #include <vector>
+#include <map>
 
 using namespace std;
 
@@ -24,6 +25,18 @@ const bool enableValidationLayers = true;
 
 VkDebugUtilsMessengerEXT callback;
 
+struct QueueFamilyIndices
+{
+    // グラフィックスコマンド用のキュー族
+    int graphicsFamily = -1;
+
+    // 必要なキュー族が全てサポートされているか
+    bool isComplete()
+    {
+        return graphicsFamily >= 0;
+    }
+};
+
 class HelloTriangleApplication
 {
 public:
@@ -39,6 +52,7 @@ private:
     GLFWwindow* window;
     VkInstance instance;
     VkDebugUtilsMessengerEXT callback;
+    VkPhysicalDevice physicalDevice = VK_NULL_HANDLE; // physicalDevice は instance に紐づくため、instance 解放時に自動解放される（明示的解放不要）
 
     void initWindow()
     {
@@ -54,6 +68,7 @@ private:
     {
         createInstance();
         setDebugCallback();
+        pickPhysicalDevice();
     }
 
     void setDebugCallback()
@@ -273,7 +288,89 @@ private:
             func(instance, pCallback, pAllocator);
         }
     }
+
+    void pickPhysicalDevice()
+    {
+        uint32_t count = 0;
+        vkEnumeratePhysicalDevices(instance, &count, nullptr);
+        if (count == 0)
+            throw("failed to get physical device with Vulkan support!");
+        vector<VkPhysicalDevice> devices(count);
+        vkEnumeratePhysicalDevices(instance, &count, devices.data());
+
+
+        multimap<int, const VkPhysicalDevice&> candidates;
+
+        for (const auto& device : devices)
+        {
+            candidates.insert(make_pair(ratePhyicalDevice(device), device));
+        }
+
+        // multimap はデフォルトでキーの昇順ソート（最終要素のキー値が最大）
+        // ※ end() は使用不可
+        if (candidates.rbegin()->first > 0)
+        {
+            physicalDevice = candidates.rbegin()->second;
+        }
+        else
+        {
+            throw("failed to get suitable physical device!");
+        }
+    }
+
+    int ratePhyicalDevice(const VkPhysicalDevice& device)
+    {
+        VkPhysicalDeviceProperties properties;
+        VkPhysicalDeviceFeatures features;
+        vkGetPhysicalDeviceProperties(device, &properties);
+        vkGetPhysicalDeviceFeatures(device, &features);
+
+        multimap<int, const VkPhysicalDevice&> candidates;
+        int score = 0;
+
+        // ディスクリートGPU 
+        if (properties.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU)
+            score += 1000;
+
+        // 2Dテクスチャ品質
+        score += properties.limits.maxImageDimension2D;
+
+        // ジオメトリシェーダ　必須
+        if (features.geometryShader == false)
+            return 0;
+
+        // 必要なコマンドキュー族 必須
+        auto queueFamily = findQueueFamilyIndices(device);
+        if (queueFamily.isComplete() == false)
+            return 0;
+    }
+
+    QueueFamilyIndices findQueueFamilyIndices(const VkPhysicalDevice& device)
+    {
+        uint32_t count = 0;
+        vkGetPhysicalDeviceQueueFamilyProperties(device, &count, nullptr);
+        vector<VkQueueFamilyProperties> properties(count);
+        vkGetPhysicalDeviceQueueFamilyProperties(device, &count, properties.data());
+
+        //  必要なキュー族の検出 
+        QueueFamilyIndices indices;
+        int i = 0;
+        for (const auto& property : properties)
+        {
+            if (property.queueCount > 0 && property.queueFlags & VK_QUEUE_GRAPHICS_BIT)
+                indices.graphicsFamily = i;
+
+            if (indices.isComplete())
+                break;
+
+            i++;
+        }
+
+        return indices;
+    }
 };
+
+
 
 int main() 
 {
