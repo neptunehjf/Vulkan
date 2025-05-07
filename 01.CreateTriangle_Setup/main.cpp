@@ -53,6 +53,8 @@ private:
     VkInstance instance;
     VkDebugUtilsMessengerEXT callback;
     VkPhysicalDevice physicalDevice = VK_NULL_HANDLE; // physicalDevice は instance に紐づくため、instance 解放時に自動解放される（明示的解放不要）
+    VkDevice device = VK_NULL_HANDLE; // 論理デバイスの作成時にcreateinfoを使用するため、明示的に解放する必要があります
+    VkQueue queue; // コマンドキューは論理デバイスの作成時に生成され、deviceの解放時に自動的に解放されます（明示的な解放不要）
 
     void initWindow()
     {
@@ -69,6 +71,7 @@ private:
         createInstance();
         setDebugCallback();
         pickPhysicalDevice();
+        createLogicalDevice();
     }
 
     void setDebugCallback()
@@ -104,6 +107,8 @@ private:
     void cleanup()
     {
         // リソースの破棄と作成の順序は正確に逆にする必要がある
+        vkDestroyDevice(device, nullptr);
+
         if (enableValidationLayers)
             DestroyDebugUtilsMessengerEXT(instance, callback, nullptr);
 
@@ -294,7 +299,7 @@ private:
         uint32_t count = 0;
         vkEnumeratePhysicalDevices(instance, &count, nullptr);
         if (count == 0)
-            throw("failed to get physical device with Vulkan support!");
+            throw runtime_error("failed to get physical device with Vulkan support!");
         vector<VkPhysicalDevice> devices(count);
         vkEnumeratePhysicalDevices(instance, &count, devices.data());
 
@@ -314,7 +319,7 @@ private:
         }
         else
         {
-            throw("failed to get suitable physical device!");
+            throw runtime_error("failed to get suitable physical device!");
         }
     }
 
@@ -367,6 +372,48 @@ private:
         }
 
         return indices;
+    }
+
+    void createLogicalDevice()
+    {
+        // キュー族情報
+        QueueFamilyIndices indices = findQueueFamilyIndices(physicalDevice);
+
+        VkDeviceQueueCreateInfo queueInfo = {};
+        queueInfo.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
+        queueInfo.queueFamilyIndex = indices.graphicsFamily;
+        queueInfo.queueCount = 1;  // キューの数。一般的に1つのキュー族で1つ以上のキューを使用することはない
+        float queuePrirorty = 1.0f; // 単一のキューでも優先度の明示的指定が必須
+        queueInfo.pQueuePriorities = &queuePrirorty;
+
+        // デバイス機能
+        VkPhysicalDeviceFeatures deviceFeature = {}; // 後回しにする
+
+        // 論理デバイスの作成
+        VkDeviceCreateInfo createInfo = {};
+        createInfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
+        createInfo.queueCreateInfoCount = 1; // グラフィックスコマンド用の1つのキュー族
+        createInfo.pQueueCreateInfos = &queueInfo;
+        createInfo.pEnabledFeatures = &deviceFeature;
+        createInfo.enabledExtensionCount = 0; // グローバル拡張機能を直接使用するため、デバイス向けの拡張機能は設定しない
+
+        // インスタンスに設定した検証レイヤーは、そのまま論理デバイスにも適用可能
+        if (enableValidationLayers)
+        {
+            createInfo.enabledLayerCount = static_cast<uint32_t>(requiredLayers.size());
+            createInfo.ppEnabledLayerNames = requiredLayers.data();
+        }
+        else
+        {
+            createInfo.enabledLayerCount = 0;
+        }
+
+        if (VK_SUCCESS != vkCreateDevice(physicalDevice, &createInfo, nullptr, &device))
+        {
+            throw runtime_error("failed to create logical device!");
+        }
+
+        vkGetDeviceQueue(device, indices.graphicsFamily, 0, &queue);
     }
 };
 
