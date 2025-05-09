@@ -1,11 +1,15 @@
-﻿#define GLFW_INCLUDE_VULKAN
+﻿#define VK_USE_PLATFORM_WIN32_KHR
+#define GLFW_INCLUDE_VULKAN
 #include <GLFW/glfw3.h>
+#define GLFW_EXPOSE_NATIVE_WIN32
+#include <GLFW/glfw3native.h>
 
 #include <iostream>
 #include <stdexcept>
 #include <cstdlib>
 #include <vector>
 #include <map>
+#include <set>
 
 using namespace std;
 
@@ -30,10 +34,13 @@ struct QueueFamilyIndices
     // グラフィックスコマンド用のキュー族
     int graphicsFamily = -1;
 
+    // 表示用のコマンドキュー族
+    int presentFamily = -1;
+
     // 必要なキュー族が全てサポートされているか
     bool isComplete()
     {
-        return graphicsFamily >= 0;
+        return graphicsFamily >= 0 && presentFamily >= 0;
     }
 };
 
@@ -54,7 +61,9 @@ private:
     VkDebugUtilsMessengerEXT callback;
     VkPhysicalDevice physicalDevice = VK_NULL_HANDLE; // physicalDevice は instance に紐づくため、instance 解放時に自動解放される（明示的解放不要）
     VkDevice device = VK_NULL_HANDLE; // 論理デバイスの作成時にcreateinfoを使用するため、明示的に解放する必要があります
-    VkQueue queue; // コマンドキューは論理デバイスの作成時に生成され、deviceの解放時に自動的に解放されます（明示的な解放不要）
+    VkQueue graphicsQueue; // コマンドキューは論理デバイスの作成時に生成され、deviceの解放時に自動的に解放されます（明示的な解放不要）
+    VkQueue presentQueue;
+    VkSurfaceKHR surface;
 
     void initWindow()
     {
@@ -70,6 +79,7 @@ private:
     {
         createInstance();
         setDebugCallback();
+        createSurface();
         pickPhysicalDevice();
         createLogicalDevice();
     }
@@ -108,6 +118,8 @@ private:
     {
         // リソースの破棄と作成の順序は正確に逆にする必要がある
         vkDestroyDevice(device, nullptr);
+
+        vkDestroySurfaceKHR(instance, surface, nullptr);
 
         if (enableValidationLayers)
             DestroyDebugUtilsMessengerEXT(instance, callback, nullptr);
@@ -365,6 +377,11 @@ private:
             if (property.queueCount > 0 && property.queueFlags & VK_QUEUE_GRAPHICS_BIT)
                 indices.graphicsFamily = i;
 
+            VkBool32 presentSupported = false;
+            vkGetPhysicalDeviceSurfaceSupportKHR(device, i, surface, &presentSupported);
+            if (property.queueCount > 0 && presentSupported)
+                indices.presentFamily = i;
+
             if (indices.isComplete())
                 break;
 
@@ -379,12 +396,21 @@ private:
         // キュー族情報
         QueueFamilyIndices indices = findQueueFamilyIndices(physicalDevice);
 
-        VkDeviceQueueCreateInfo queueInfo = {};
-        queueInfo.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
-        queueInfo.queueFamilyIndex = indices.graphicsFamily;
-        queueInfo.queueCount = 1;  // キューの数。一般的に1つのキュー族で1つ以上のキューを使用することはない
-        float queuePrirorty = 1.0f; // 単一のキューでも優先度の明示的指定が必須
-        queueInfo.pQueuePriorities = &queuePrirorty;
+        vector<VkDeviceQueueCreateInfo> queueInfos = {};
+
+        // 赤黒木セットを使用すると重複要素を自動的に除外できます（例：graphicsQueueとprensentQueueが同一キュー族の場合、1つのキューのみ走査すれば良い）
+        set<int> uniqueQueueFamilies = { indices.graphicsFamily, indices.presentFamily };
+
+        for (auto index : uniqueQueueFamilies)
+        {
+            VkDeviceQueueCreateInfo queueInfo = {};
+            queueInfo.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
+            queueInfo.queueFamilyIndex = index;
+            queueInfo.queueCount = 1;  // キューの数。一般的に1つのキュー族で1つ以上のキューを使用することはない
+            float queuePrirorty = 1.0f; // 単一のキューでも優先度の明示的指定が必須
+            queueInfo.pQueuePriorities = &queuePrirorty;
+            queueInfos.push_back(queueInfo);
+        }
 
         // デバイス機能
         VkPhysicalDeviceFeatures deviceFeature = {}; // 後回しにする
@@ -392,8 +418,8 @@ private:
         // 論理デバイスの作成
         VkDeviceCreateInfo createInfo = {};
         createInfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
-        createInfo.queueCreateInfoCount = 1; // グラフィックスコマンド用の1つのキュー族
-        createInfo.pQueueCreateInfos = &queueInfo;
+        createInfo.queueCreateInfoCount = static_cast<uint32_t>(queueInfos.size());
+        createInfo.pQueueCreateInfos = queueInfos.data();
         createInfo.pEnabledFeatures = &deviceFeature;
         createInfo.enabledExtensionCount = 0; // グローバル拡張機能を直接使用するため、デバイス向けの拡張機能は設定しない
 
@@ -413,10 +439,26 @@ private:
             throw runtime_error("failed to create logical device!");
         }
 
-        vkGetDeviceQueue(device, indices.graphicsFamily, 0, &queue);
+        vkGetDeviceQueue(device, indices.graphicsFamily, 0, &graphicsQueue);
+        vkGetDeviceQueue(device, indices.presentFamily, 0, &presentQueue);
+    }
+
+    void createSurface()
+    {
+        VkWin32SurfaceCreateInfoKHR createInfo = {};
+        createInfo.sType = VK_STRUCTURE_TYPE_WIN32_SURFACE_CREATE_INFO_KHR;
+        createInfo.hwnd = glfwGetWin32Window(window);
+        createInfo.hinstance = GetModuleHandle(nullptr);  //注：ここのインスタンスはVkインスタンスではなく、現在のプロセスのインスタンスハンドルです
+
+        auto CreateWin32SurfaceKHR = (PFN_vkCreateWin32SurfaceKHR)vkGetInstanceProcAddr(instance, "vkCreateWin32SurfaceKHR");
+
+        if (CreateWin32SurfaceKHR != nullptr && 
+            CreateWin32SurfaceKHR(instance, &createInfo, nullptr, &surface) != VK_SUCCESS)
+        {
+            throw runtime_error("failed to create window surface!");
+        }
     }
 };
-
 
 
 int main() 
