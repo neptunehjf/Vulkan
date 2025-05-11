@@ -1,8 +1,11 @@
-﻿#define VK_USE_PLATFORM_WIN32_KHR
+﻿#define NOMINMAX   // limits.hのmax()定義がminwindef.hに上書きされるのを防ぐ
+
+#define VK_USE_PLATFORM_WIN32_KHR
 #define GLFW_INCLUDE_VULKAN
 #include <GLFW/glfw3.h>
 #define GLFW_EXPOSE_NATIVE_WIN32
 #include <GLFW/glfw3native.h>
+
 
 #include <iostream>
 #include <stdexcept>
@@ -10,6 +13,8 @@
 #include <vector>
 #include <map>
 #include <set>
+#include <limits>
+#include <algorithm>
 
 using namespace std;
 
@@ -19,6 +24,18 @@ const uint32_t HEIGHT = 600;
 const vector<const char*> requiredLayers =
 {
     "VK_LAYER_KHRONOS_validation" // VK_LAYER_KHRONOS_validationで暗黙的にすべての検証レイヤーを有効化
+};
+
+const vector<const char*> requiredDeviceExtension =
+{
+    VK_KHR_SWAPCHAIN_EXTENSION_NAME
+};
+
+struct SwapChainSupportDetails 
+{
+    VkSurfaceCapabilitiesKHR capabilities;
+    vector<VkSurfaceFormatKHR> formats;
+    vector<VkPresentModeKHR> presentModes;
 };
 
 #ifdef NDEBUG // リリース版ではパフォーマンス向上のため検証レイヤーを無効化
@@ -64,6 +81,10 @@ private:
     VkQueue graphicsQueue; // コマンドキューは論理デバイスの作成時に生成され、deviceの解放時に自動的に解放されます（明示的な解放不要）
     VkQueue presentQueue;
     VkSurfaceKHR surface;
+    VkSwapchainKHR swapChain;
+    vector<VkImage> swapChainImages;
+    VkFormat swapChainImageFormat;
+    VkExtent2D swapChainExtent;
 
     void initWindow()
     {
@@ -82,6 +103,7 @@ private:
         createSurface();
         pickPhysicalDevice();
         createLogicalDevice();
+        createSwapChain();
     }
 
     void setDebugCallback()
@@ -117,6 +139,8 @@ private:
     void cleanup()
     {
         // リソースの破棄と作成の順序は正確に逆にする必要がある
+        vkDestroySwapchainKHR(device, swapChain, nullptr);
+
         vkDestroyDevice(device, nullptr);
 
         vkDestroySurfaceKHR(instance, surface, nullptr);
@@ -360,6 +384,19 @@ private:
         auto queueFamily = findQueueFamilyIndices(device);
         if (queueFamily.isComplete() == false)
             return 0;
+
+        // 設備拡張　必須
+        if (!checkDeviceExtensionSupport(device))
+            return 0;
+
+        // スワップチェーンのサポート（formatsとpresentModes）は空であってはならない
+        auto swapChainSupport = getSupportedSwapChain(device);
+
+        if (swapChainSupport.formats.empty() || swapChainSupport.presentModes.empty())
+        {
+            return 0;
+        }
+
     }
 
     QueueFamilyIndices findQueueFamilyIndices(const VkPhysicalDevice& device)
@@ -421,7 +458,8 @@ private:
         createInfo.queueCreateInfoCount = static_cast<uint32_t>(queueInfos.size());
         createInfo.pQueueCreateInfos = queueInfos.data();
         createInfo.pEnabledFeatures = &deviceFeature;
-        createInfo.enabledExtensionCount = 0; // グローバル拡張機能を直接使用するため、デバイス向けの拡張機能は設定しない
+        createInfo.enabledExtensionCount = static_cast<uint32_t>(requiredDeviceExtension.size());
+        createInfo.ppEnabledExtensionNames = requiredDeviceExtension.data();
 
         // インスタンスに設定した検証レイヤーは、そのまま論理デバイスにも適用可能
         if (enableValidationLayers)
@@ -457,6 +495,173 @@ private:
         {
             throw runtime_error("failed to create window surface!");
         }
+    }
+
+    bool checkDeviceExtensionSupport(VkPhysicalDevice device) 
+    {
+        uint32_t extensionCount;
+        vkEnumerateDeviceExtensionProperties(device, nullptr, &extensionCount, nullptr);
+        vector<VkExtensionProperties> availableExtensions(extensionCount);
+        vkEnumerateDeviceExtensionProperties(device, nullptr, &extensionCount, availableExtensions.data());
+
+        set<string> requiredExtensions(requiredDeviceExtension.begin(), requiredDeviceExtension.end());
+        for (const auto& extension : availableExtensions) 
+        {
+            requiredExtensions.erase(extension.extensionName);
+        }
+
+        // 空でない場合、サポートされていないデバイス拡張が存在する
+        return requiredExtensions.empty();
+
+        return true;
+    }
+
+    SwapChainSupportDetails getSupportedSwapChain(VkPhysicalDevice device) 
+    {
+        SwapChainSupportDetails details;
+
+        // capabilities
+        vkGetPhysicalDeviceSurfaceCapabilitiesKHR(device, surface, &details.capabilities);
+
+        // format
+        uint32_t formatCount;
+        vkGetPhysicalDeviceSurfaceFormatsKHR(device, surface, &formatCount, nullptr);
+
+        if (formatCount != 0) 
+        {
+            details.formats.resize(formatCount);
+            vkGetPhysicalDeviceSurfaceFormatsKHR(device, surface, &formatCount, details.formats.data());
+        }
+
+        // presentMode
+        uint32_t presentModeCount;
+        vkGetPhysicalDeviceSurfacePresentModesKHR(device, surface, &presentModeCount, nullptr);
+
+        if (presentModeCount != 0) 
+        {
+            details.presentModes.resize(presentModeCount);
+            vkGetPhysicalDeviceSurfacePresentModesKHR(device, surface, &presentModeCount, details.presentModes.data());
+        }
+
+        return details;
+    }
+    
+    VkExtent2D chooseSwapExtent(const VkSurfaceCapabilitiesKHR& capabilities) 
+    {
+        // 現在のExtentが最大値でない場合、現在の数値を使用
+        if (capabilities.currentExtent.width != numeric_limits<uint32_t>::max()) 
+        {
+            return capabilities.currentExtent;
+        }
+        // 現在のExtentが最大値の場合、独自に設定可能
+        else 
+        {
+            int width, height;
+            glfwGetFramebufferSize(window, &width, &height);
+
+            VkExtent2D actualExtent = 
+            {
+                static_cast<uint32_t>(width),
+                static_cast<uint32_t>(height)
+            };
+
+            actualExtent.width = clamp(actualExtent.width, capabilities.minImageExtent.width, capabilities.maxImageExtent.width);
+            actualExtent.height = clamp(actualExtent.height, capabilities.minImageExtent.height, capabilities.maxImageExtent.height);
+
+            return actualExtent;
+        }
+    }
+
+    VkSurfaceFormatKHR chooseSwapSurfaceFormat(const vector<VkSurfaceFormatKHR>& availableFormats) 
+    {
+        for (const auto& availableFormat : availableFormats) 
+        {
+            //  SRGB非線形空間を使用するのはガンマ補正のため
+            if (availableFormat.format == VK_FORMAT_B8G8R8A8_SRGB && availableFormat.colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR) 
+            {
+                return availableFormat;
+            }
+        }
+
+        return availableFormats[0];
+    }
+
+    // PresentModeは垂直同期の仕組みを提供し、画面ティアリングを改善
+    VkPresentModeKHR chooseSwapPresentMode(const std::vector<VkPresentModeKHR>& availablePresentModes) 
+    {
+        for (const auto& availablePresentMode : availablePresentModes) 
+        {
+            if (availablePresentMode == VK_PRESENT_MODE_MAILBOX_KHR) 
+            {
+                return VK_PRESENT_MODE_MAILBOX_KHR;
+            }
+        }
+
+        return VK_PRESENT_MODE_FIFO_KHR;
+    }
+
+    void createSwapChain() 
+    {
+        SwapChainSupportDetails swapChainSupport = getSupportedSwapChain(physicalDevice);
+
+        VkSurfaceFormatKHR surfaceFormat = chooseSwapSurfaceFormat(swapChainSupport.formats);
+        VkPresentModeKHR presentMode = chooseSwapPresentMode(swapChainSupport.presentModes);
+        VkExtent2D extent = chooseSwapExtent(swapChainSupport.capabilities);
+
+        // バッファを1つ追加し、レンダリングブロッキングを低減
+        uint32_t imageCount = swapChainSupport.capabilities.minImageCount + 1;
+        if (swapChainSupport.capabilities.maxImageCount > 0 && imageCount > swapChainSupport.capabilities.maxImageCount) 
+        {
+            imageCount = swapChainSupport.capabilities.maxImageCount;
+        }
+
+        VkSwapchainCreateInfoKHR createInfo{};
+        createInfo.sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR;
+        createInfo.surface = surface;
+        createInfo.minImageCount = imageCount;
+        createInfo.imageFormat = surfaceFormat.format;
+        createInfo.imageColorSpace = surfaceFormat.colorSpace;
+        createInfo.imageExtent = extent;
+        createInfo.imageArrayLayers = 1; // VR関連、ここでは1に設定
+        createInfo.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT; // カラーアタッチメントとして使用
+
+        QueueFamilyIndices indices = findQueueFamilyIndices(physicalDevice);
+        uint32_t queueFamilyIndices[] = { indices.graphicsFamily, indices.presentFamily };
+
+        if (indices.graphicsFamily != indices.presentFamily) 
+        {
+            // 複数のコマンドファミリーを並行処理する
+            createInfo.imageSharingMode = VK_SHARING_MODE_CONCURRENT;
+            createInfo.queueFamilyIndexCount = 2;
+            createInfo.pQueueFamilyIndices = queueFamilyIndices;
+        }
+        else 
+        {
+            // 単一のコマンド族処理で最高のパフォーマンス
+            createInfo.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
+            createInfo.queueFamilyIndexCount = 0;  // オプション
+            createInfo.pQueueFamilyIndices = nullptr; // オプション
+        }
+
+        createInfo.preTransform = swapChainSupport.capabilities.currentTransform; // 現在のTransformを維持
+        createInfo.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR; // ウィンドウ間のブレンド
+        createInfo.presentMode = presentMode;
+        createInfo.clipped = VK_TRUE; // Ⅴulkanには、他のウィンドウに隠れたピクセルを最適化可能
+        createInfo.oldSwapchain = VK_NULL_HANDLE; // スワップチェーンのリビルド用、暫定VK_NULL_HANDLE
+
+
+        // スワップチェーン作成
+        if (vkCreateSwapchainKHR(device, &createInfo, nullptr, &swapChain) != VK_SUCCESS) 
+        {
+            throw runtime_error("failed to create swap chain!");
+        }
+
+        // スワップチェーンイメージ取得
+        vkGetSwapchainImagesKHR(device, swapChain, &imageCount, nullptr);
+        swapChainImages.resize(imageCount);
+        vkGetSwapchainImagesKHR(device, swapChain, &imageCount, swapChainImages.data());
+        swapChainImageFormat = surfaceFormat.format;
+        swapChainExtent = extent;
     }
 };
 
