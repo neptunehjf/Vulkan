@@ -15,6 +15,7 @@
 #include <set>
 #include <limits>
 #include <algorithm>
+#include <fstream>
 
 using namespace std;
 
@@ -106,6 +107,7 @@ private:
         createLogicalDevice();
         createSwapChain();
         createImageViews();
+        createGraphicsPipeline();
     }
 
     void setDebugCallback()
@@ -594,7 +596,7 @@ private:
     }
 
     // PresentModeは垂直同期の仕組みを提供し、画面ティアリングを改善
-    VkPresentModeKHR chooseSwapPresentMode(const std::vector<VkPresentModeKHR>& availablePresentModes) 
+    VkPresentModeKHR chooseSwapPresentMode(const vector<VkPresentModeKHR>& availablePresentModes) 
     {
         for (const auto& availablePresentMode : availablePresentModes) 
         {
@@ -700,6 +702,75 @@ private:
         }
     }
 
+    void createGraphicsPipeline() 
+    {
+        auto vertShaderCode = readFile("shaders/vert.spv");
+        auto fragShaderCode = readFile("shaders/frag.spv");
+
+        VkShaderModule vertShaderModule = createShaderModule(vertShaderCode);
+        VkShaderModule fragShaderModule = createShaderModule(fragShaderCode);
+
+        VkPipelineShaderStageCreateInfo vertShaderStageInfo{};
+        vertShaderStageInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        vertShaderStageInfo.stage = VK_SHADER_STAGE_VERTEX_BIT;
+        vertShaderStageInfo.module = vertShaderModule;
+        vertShaderStageInfo.pName = "main"; // 異なるpNameをエントリ関数名として指定することで、1つのコード内で複数のシェーダーを実装可能
+
+        VkPipelineShaderStageCreateInfo fragShaderStageInfo{};
+        fragShaderStageInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        fragShaderStageInfo.stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+        fragShaderStageInfo.module = fragShaderModule;
+        fragShaderStageInfo.pName = "main";
+
+        VkPipelineShaderStageCreateInfo shaderStages[] = { vertShaderStageInfo, fragShaderStageInfo };
+
+        // ModuleはPipelineに管理させ、自身のメモリを解放する
+        vkDestroyShaderModule(device, fragShaderModule, nullptr);
+        vkDestroyShaderModule(device, vertShaderModule, nullptr);
+    }
+
+    VkShaderModule createShaderModule(const std::vector<char>& code) 
+    {
+        VkShaderModuleCreateInfo createInfo{};
+        createInfo.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+        createInfo.codeSize = code.size();
+        createInfo.pCode = reinterpret_cast<const uint32_t*>(code.data()); // const char* => const uint32_t*
+
+        VkShaderModule shaderModule;
+        if (vkCreateShaderModule(device, &createInfo, nullptr, &shaderModule) != VK_SUCCESS) 
+        {
+            throw std::runtime_error("failed to create shader module!");
+        }
+
+        return shaderModule;
+    }
+
+
+
+    static vector<char> readFile(const string& filename) 
+    {
+        // ateでファイルポインタを末尾に位置づける
+        ifstream file(filename, ios::ate | ios::binary);
+
+        if (!file.is_open()) 
+        {
+            throw runtime_error("failed to open file!");
+        }
+
+        // tellgで現在のファイルポインタの先頭からのオフセットを計算
+        // 現在ポインタは末尾にあるため、tellgの戻り値はファイルサイズとなる
+        size_t fileSize = (size_t)file.tellg();
+        vector<char> buffer(fileSize);
+
+        // ポインタをファイル先頭に位置づけて、ファイルを読み込む
+        file.seekg(0);
+        file.read(buffer.data(), fileSize);
+
+        file.close();
+
+        return buffer;
+    }
+
 };
 
 
@@ -711,9 +782,9 @@ int main()
     {
         app.run();
     }
-    catch (const std::exception& e) 
+    catch (const exception& e) 
     {
-        std::cerr << e.what() << std::endl;
+        cerr << e.what() << endl;
         return EXIT_FAILURE;
     }
 
