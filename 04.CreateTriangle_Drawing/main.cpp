@@ -981,6 +981,7 @@ private:
         VkCommandBufferBeginInfo beginInfo{};
         beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
 
+        // 注意 vkBeginCommandBufferを呼び出すと、commandBufferをリセットする
         if (vkBeginCommandBuffer(commandBuffer, &beginInfo) != VK_SUCCESS) 
         {
             throw runtime_error("failed to begin recording command buffer!");
