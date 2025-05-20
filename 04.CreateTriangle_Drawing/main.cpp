@@ -32,7 +32,7 @@ const vector<const char*> requiredDeviceExtension =
     VK_KHR_SWAPCHAIN_EXTENSION_NAME
 };
 
-struct SwapChainSupportDetails 
+struct SwapChainSupportDetails
 {
     VkSurfaceCapabilitiesKHR capabilities;
     vector<VkSurfaceFormatKHR> formats;
@@ -90,6 +90,8 @@ private:
     VkPipelineLayout pipelineLayout; // 固定機能の管理に使用
     VkRenderPass renderPass;
     VkPipeline graphicsPipeline;
+    vector<VkFramebuffer> swapChainFramebuffers;  // 1つのattachmentが複数のswapchain画像に対応する可能性があるため、複数のframebufferが必要
+
 
     void initWindow()
     {
@@ -112,6 +114,7 @@ private:
         createImageViews();
         createRenderPass();
         createGraphicsPipeline();
+        createFramebuffers();
     }
 
     void setDebugCallback()
@@ -122,11 +125,11 @@ private:
         VkDebugUtilsMessengerCreateInfoEXT createInfo = {};
         createInfo.sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT;
         createInfo.messageSeverity = VK_DEBUG_UTILS_MESSAGE_SEVERITY_VERBOSE_BIT_EXT |
-                                     VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT |
-                                     VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT;
-        createInfo.messageType = VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT | 
-                                 VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT | 
-                                 VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT;
+            VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT |
+            VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT;
+        createInfo.messageType = VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT |
+            VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT |
+            VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT;
         createInfo.pfnUserCallback = debugCallback;
         createInfo.pUserData = nullptr; // オプションパラメータ
 
@@ -147,13 +150,19 @@ private:
     void cleanup()
     {
         // リソースの破棄と作成の順序は正確に逆にする必要がある
+
+        for (auto framebuffer : swapChainFramebuffers)
+        {
+            vkDestroyFramebuffer(device, framebuffer, nullptr);
+        }
+
         vkDestroyPipeline(device, graphicsPipeline, nullptr);
 
         vkDestroyPipelineLayout(device, pipelineLayout, nullptr);
 
         vkDestroyRenderPass(device, renderPass, nullptr);
 
-        for (auto imageView : swapChainImageViews) 
+        for (auto imageView : swapChainImageViews)
         {
             vkDestroyImageView(device, imageView, nullptr);
         }
@@ -313,7 +322,7 @@ private:
         VkDebugUtilsMessageSeverityFlagBitsEXT messageSeverity,
         VkDebugUtilsMessageTypeFlagsEXT messageType,
         const VkDebugUtilsMessengerCallbackDataEXT* pCallbackData,
-        void* pUserData) 
+        void* pUserData)
     {
         cerr << "validation layer: " << pCallbackData->pMessage << endl;
         return VK_FALSE;
@@ -321,29 +330,29 @@ private:
 
     // vkCreateDebugUtilsMessengerEXTは拡張関数のため、vkGetInstanceProcAddrで動的にロードする必要がある
     VkResult CreateDebugUtilsMessengerEXT(
-        VkInstance instance, 
-        const VkDebugUtilsMessengerCreateInfoEXT* pCreateInfo, 
-        const VkAllocationCallbacks* pAllocator, 
+        VkInstance instance,
+        const VkDebugUtilsMessengerCreateInfoEXT* pCreateInfo,
+        const VkAllocationCallbacks* pAllocator,
         VkDebugUtilsMessengerEXT* pCallback)
     {
         auto func = (PFN_vkCreateDebugUtilsMessengerEXT)vkGetInstanceProcAddr(instance, "vkCreateDebugUtilsMessengerEXT");
-        if (func != nullptr) 
+        if (func != nullptr)
         {
             return func(instance, pCreateInfo, pAllocator, pCallback);
         }
-        else 
+        else
         {
             return VK_ERROR_EXTENSION_NOT_PRESENT;
         }
     }
 
     void DestroyDebugUtilsMessengerEXT(
-        VkInstance instance, 
+        VkInstance instance,
         VkDebugUtilsMessengerEXT pCallback,
-        const VkAllocationCallbacks* pAllocator) 
+        const VkAllocationCallbacks* pAllocator)
     {
         auto func = (PFN_vkDestroyDebugUtilsMessengerEXT)vkGetInstanceProcAddr(instance, "vkDestroyDebugUtilsMessengerEXT");
-        if (func != nullptr) 
+        if (func != nullptr)
         {
             func(instance, pCallback, pAllocator);
         }
@@ -509,14 +518,14 @@ private:
 
         auto CreateWin32SurfaceKHR = (PFN_vkCreateWin32SurfaceKHR)vkGetInstanceProcAddr(instance, "vkCreateWin32SurfaceKHR");
 
-        if (CreateWin32SurfaceKHR != nullptr && 
+        if (CreateWin32SurfaceKHR != nullptr &&
             CreateWin32SurfaceKHR(instance, &createInfo, nullptr, &surface) != VK_SUCCESS)
         {
             throw runtime_error("failed to create window surface!");
         }
     }
 
-    bool checkDeviceExtensionSupport(VkPhysicalDevice device) 
+    bool checkDeviceExtensionSupport(VkPhysicalDevice device)
     {
         uint32_t extensionCount;
         vkEnumerateDeviceExtensionProperties(device, nullptr, &extensionCount, nullptr);
@@ -524,7 +533,7 @@ private:
         vkEnumerateDeviceExtensionProperties(device, nullptr, &extensionCount, availableExtensions.data());
 
         set<string> requiredExtensions(requiredDeviceExtension.begin(), requiredDeviceExtension.end());
-        for (const auto& extension : availableExtensions) 
+        for (const auto& extension : availableExtensions)
         {
             requiredExtensions.erase(extension.extensionName);
         }
@@ -535,7 +544,7 @@ private:
         return true;
     }
 
-    SwapChainSupportDetails getSupportedSwapChain(VkPhysicalDevice device) 
+    SwapChainSupportDetails getSupportedSwapChain(VkPhysicalDevice device)
     {
         SwapChainSupportDetails details;
 
@@ -546,7 +555,7 @@ private:
         uint32_t formatCount;
         vkGetPhysicalDeviceSurfaceFormatsKHR(device, surface, &formatCount, nullptr);
 
-        if (formatCount != 0) 
+        if (formatCount != 0)
         {
             details.formats.resize(formatCount);
             vkGetPhysicalDeviceSurfaceFormatsKHR(device, surface, &formatCount, details.formats.data());
@@ -556,7 +565,7 @@ private:
         uint32_t presentModeCount;
         vkGetPhysicalDeviceSurfacePresentModesKHR(device, surface, &presentModeCount, nullptr);
 
-        if (presentModeCount != 0) 
+        if (presentModeCount != 0)
         {
             details.presentModes.resize(presentModeCount);
             vkGetPhysicalDeviceSurfacePresentModesKHR(device, surface, &presentModeCount, details.presentModes.data());
@@ -564,21 +573,21 @@ private:
 
         return details;
     }
-    
-    VkExtent2D chooseSwapExtent(const VkSurfaceCapabilitiesKHR& capabilities) 
+
+    VkExtent2D chooseSwapExtent(const VkSurfaceCapabilitiesKHR& capabilities)
     {
         // 現在のExtentが最大値でない場合、現在の数値を使用
-        if (capabilities.currentExtent.width != numeric_limits<uint32_t>::max()) 
+        if (capabilities.currentExtent.width != numeric_limits<uint32_t>::max())
         {
             return capabilities.currentExtent;
         }
         // 現在のExtentが最大値の場合、独自に設定可能
-        else 
+        else
         {
             int width, height;
             glfwGetFramebufferSize(window, &width, &height);
 
-            VkExtent2D actualExtent = 
+            VkExtent2D actualExtent =
             {
                 static_cast<uint32_t>(width),
                 static_cast<uint32_t>(height)
@@ -591,12 +600,12 @@ private:
         }
     }
 
-    VkSurfaceFormatKHR chooseSwapSurfaceFormat(const vector<VkSurfaceFormatKHR>& availableFormats) 
+    VkSurfaceFormatKHR chooseSwapSurfaceFormat(const vector<VkSurfaceFormatKHR>& availableFormats)
     {
-        for (const auto& availableFormat : availableFormats) 
+        for (const auto& availableFormat : availableFormats)
         {
             //  SRGB非線形空間を使用するのはガンマ補正のため
-            if (availableFormat.format == VK_FORMAT_B8G8R8A8_SRGB && availableFormat.colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR) 
+            if (availableFormat.format == VK_FORMAT_B8G8R8A8_SRGB && availableFormat.colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR)
             {
                 return availableFormat;
             }
@@ -606,11 +615,11 @@ private:
     }
 
     // PresentModeは垂直同期の仕組みを提供し、画面ティアリングを改善
-    VkPresentModeKHR chooseSwapPresentMode(const vector<VkPresentModeKHR>& availablePresentModes) 
+    VkPresentModeKHR chooseSwapPresentMode(const vector<VkPresentModeKHR>& availablePresentModes)
     {
-        for (const auto& availablePresentMode : availablePresentModes) 
+        for (const auto& availablePresentMode : availablePresentModes)
         {
-            if (availablePresentMode == VK_PRESENT_MODE_MAILBOX_KHR) 
+            if (availablePresentMode == VK_PRESENT_MODE_MAILBOX_KHR)
             {
                 return VK_PRESENT_MODE_MAILBOX_KHR;
             }
@@ -619,7 +628,7 @@ private:
         return VK_PRESENT_MODE_FIFO_KHR;
     }
 
-    void createSwapChain() 
+    void createSwapChain()
     {
         SwapChainSupportDetails swapChainSupport = getSupportedSwapChain(physicalDevice);
 
@@ -629,7 +638,7 @@ private:
 
         // バッファを1つ追加し、レンダリングブロッキングを低減
         uint32_t imageCount = swapChainSupport.capabilities.minImageCount + 1;
-        if (swapChainSupport.capabilities.maxImageCount > 0 && imageCount > swapChainSupport.capabilities.maxImageCount) 
+        if (swapChainSupport.capabilities.maxImageCount > 0 && imageCount > swapChainSupport.capabilities.maxImageCount)
         {
             imageCount = swapChainSupport.capabilities.maxImageCount;
         }
@@ -647,14 +656,14 @@ private:
         QueueFamilyIndices indices = findQueueFamilyIndices(physicalDevice);
         uint32_t queueFamilyIndices[] = { indices.graphicsFamily, indices.presentFamily };
 
-        if (indices.graphicsFamily != indices.presentFamily) 
+        if (indices.graphicsFamily != indices.presentFamily)
         {
             // 複数のコマンドファミリーを並行処理する
             createInfo.imageSharingMode = VK_SHARING_MODE_CONCURRENT;
             createInfo.queueFamilyIndexCount = 2;
             createInfo.pQueueFamilyIndices = queueFamilyIndices;
         }
-        else 
+        else
         {
             // 単一のコマンド族処理で最高のパフォーマンス
             createInfo.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
@@ -670,7 +679,7 @@ private:
 
 
         // スワップチェーン作成
-        if (vkCreateSwapchainKHR(device, &createInfo, nullptr, &swapChain) != VK_SUCCESS) 
+        if (vkCreateSwapchainKHR(device, &createInfo, nullptr, &swapChain) != VK_SUCCESS)
         {
             throw runtime_error("failed to create swap chain!");
         }
@@ -687,7 +696,7 @@ private:
     {
         swapChainImageViews.resize(swapChainImages.size());
 
-        for (size_t i = 0; i < swapChainImages.size(); i++) 
+        for (size_t i = 0; i < swapChainImages.size(); i++)
         {
             VkImageViewCreateInfo createInfo{};
             createInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
@@ -698,13 +707,13 @@ private:
             createInfo.components.g = VK_COMPONENT_SWIZZLE_IDENTITY;
             createInfo.components.b = VK_COMPONENT_SWIZZLE_IDENTITY;
             createInfo.components.a = VK_COMPONENT_SWIZZLE_IDENTITY;
-            createInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT; 
+            createInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
             createInfo.subresourceRange.baseMipLevel = 0; // mipmapなし
             createInfo.subresourceRange.levelCount = 1;
             createInfo.subresourceRange.baseArrayLayer = 0; // VR関連、ここでは0に設定
             createInfo.subresourceRange.layerCount = 1;
 
-            if (vkCreateImageView(device, &createInfo, nullptr, &swapChainImageViews[i]) != VK_SUCCESS) 
+            if (vkCreateImageView(device, &createInfo, nullptr, &swapChainImageViews[i]) != VK_SUCCESS)
             {
                 throw runtime_error("failed to create image views!");
             }
@@ -712,7 +721,7 @@ private:
         }
     }
 
-    void createRenderPass() 
+    void createRenderPass()
     {
         VkAttachmentDescription colorAttachment{};
         colorAttachment.format = swapChainImageFormat;
@@ -740,13 +749,13 @@ private:
         renderPassInfo.subpassCount = 1;
         renderPassInfo.pSubpasses = &subpass;
 
-        if (vkCreateRenderPass(device, &renderPassInfo, nullptr, &renderPass) != VK_SUCCESS) 
+        if (vkCreateRenderPass(device, &renderPassInfo, nullptr, &renderPass) != VK_SUCCESS)
         {
             throw runtime_error("failed to create render pass!");
         }
     }
 
-    void createGraphicsPipeline() 
+    void createGraphicsPipeline()
     {
         auto vertShaderCode = readFile("shaders/vert.spv");
         auto fragShaderCode = readFile("shaders/frag.spv");
@@ -801,7 +810,7 @@ private:
         VkPipelineMultisampleStateCreateInfo multisampling{};
         multisampling.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
         multisampling.sampleShadingEnable = VK_FALSE;
-        multisampling.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT; 
+        multisampling.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
 
         // ブレンド設定
         VkPipelineColorBlendAttachmentState colorBlendAttachment{};
@@ -820,7 +829,7 @@ private:
         colorBlending.blendConstants[3] = 0.0f;
 
         // 動的に変更可能な機能の指定
-        vector<VkDynamicState> dynamicStates = 
+        vector<VkDynamicState> dynamicStates =
         {
             VK_DYNAMIC_STATE_VIEWPORT,
             VK_DYNAMIC_STATE_SCISSOR
@@ -836,7 +845,7 @@ private:
         pipelineLayoutInfo.setLayoutCount = 0;
         pipelineLayoutInfo.pushConstantRangeCount = 0;
 
-        if (vkCreatePipelineLayout(device, &pipelineLayoutInfo, nullptr, &pipelineLayout) != VK_SUCCESS) 
+        if (vkCreatePipelineLayout(device, &pipelineLayoutInfo, nullptr, &pipelineLayout) != VK_SUCCESS)
         {
             throw runtime_error("failed to create pipeline layout!");
         }
@@ -858,9 +867,9 @@ private:
         pipelineInfo.subpass = 0;
         pipelineInfo.basePipelineHandle = VK_NULL_HANDLE; // 派生パイプラインを使用するかどうか。派生はコピーよりもパフォーマンスが良い
 
-        if (vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &graphicsPipeline) != VK_SUCCESS) 
+        if (vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &graphicsPipeline) != VK_SUCCESS)
         {
-            throw std::runtime_error("failed to create graphics pipeline!");
+            throw runtime_error("failed to create graphics pipeline!");
         }
 
         // ModuleはPipelineに管理させ、自身のメモリを解放する
@@ -868,7 +877,7 @@ private:
         vkDestroyShaderModule(device, vertShaderModule, nullptr);
     }
 
-    VkShaderModule createShaderModule(const vector<char>& code) 
+    VkShaderModule createShaderModule(const vector<char>& code)
     {
         VkShaderModuleCreateInfo createInfo{};
         createInfo.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
@@ -876,7 +885,7 @@ private:
         createInfo.pCode = reinterpret_cast<const uint32_t*>(code.data()); // const char* => const uint32_t*
 
         VkShaderModule shaderModule;
-        if (vkCreateShaderModule(device, &createInfo, nullptr, &shaderModule) != VK_SUCCESS) 
+        if (vkCreateShaderModule(device, &createInfo, nullptr, &shaderModule) != VK_SUCCESS)
         {
             throw runtime_error("failed to create shader module!");
         }
@@ -884,12 +893,12 @@ private:
         return shaderModule;
     }
 
-    static vector<char> readFile(const string& filename) 
+    static vector<char> readFile(const string& filename)
     {
         // ateでファイルポインタを末尾に位置づける
         ifstream file(filename, ios::ate | ios::binary);
 
-        if (!file.is_open()) 
+        if (!file.is_open())
         {
             throw runtime_error("failed to open file!");
         }
@@ -908,18 +917,42 @@ private:
         return buffer;
     }
 
+    void createFramebuffers()
+    {
+        swapChainFramebuffers.resize(swapChainImageViews.size());
+
+        for (size_t i = 0; i < swapChainImageViews.size(); i++)
+        {
+            VkImageView attachments[] = { swapChainImageViews[i] }; // {} を使用して要素数1の一時的な配列を作成
+
+            VkFramebufferCreateInfo framebufferInfo{};
+            framebufferInfo.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
+            framebufferInfo.renderPass = renderPass;
+            framebufferInfo.attachmentCount = 1;
+            framebufferInfo.pAttachments = attachments;
+            framebufferInfo.width = swapChainExtent.width;
+            framebufferInfo.height = swapChainExtent.height;
+            framebufferInfo.layers = 1; // VR関連　無視
+
+            if (vkCreateFramebuffer(device, &framebufferInfo, nullptr, &swapChainFramebuffers[i]) != VK_SUCCESS)
+            {
+                throw runtime_error("failed to create framebuffer!");
+            }
+        }
+    }
+
 };
 
 
-int main() 
+int main()
 {
     HelloTriangleApplication app;
 
-    try 
+    try
     {
         app.run();
     }
-    catch (const exception& e) 
+    catch (const exception& e)
     {
         cerr << e.what() << endl;
         return EXIT_FAILURE;
