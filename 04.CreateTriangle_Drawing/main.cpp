@@ -94,6 +94,11 @@ private:
     VkCommandPool commandPool;
     VkCommandBuffer commandBuffer;
 
+    // VulkanのAPI呼び出しの大部分は非同期であるため、明示的に同期を実装する必要があります
+    VkSemaphore imageAvailableSemaphore; // GPU内の各コマンド間の同期を実現
+    VkSemaphore renderFinishedSemaphore; // GPU内の各コマンド間の同期を実現
+    VkFence inFlightFence; // CPUとGPU間の同期を実現
+
     void initWindow()
     {
         glfwInit();
@@ -101,7 +106,7 @@ private:
         glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API); // GLFWが自動的にOpenGLコンテキストを作成しないように設定する
         glfwWindowHint(GLFW_RESIZABLE, GLFW_FALSE);
 
-        window = glfwCreateWindow(WIDTH, HEIGHT, "Vulkan", nullptr, nullptr);
+        window = glfwCreateWindow(WIDTH, HEIGHT, "koalahjf@gmail.com", nullptr, nullptr);
     }
 
     void initVulkan()
@@ -118,6 +123,7 @@ private:
         createFramebuffers();
         createCommandPool();
         createCommandBuffer();
+        createSyncObjects();
     }
 
     void setDebugCallback()
@@ -147,12 +153,21 @@ private:
         while (!glfwWindowShouldClose(window))
         {
             glfwPollEvents();
+            drawFrame();
         }
+
+        // ウィンドウが閉じられた後、同期オブジェクトを破棄(cleanup) GPU内の非同期コマンドがまだ完了していない可能性があるため、エラーが発生する
+        vkDeviceWaitIdle(device); 
     }
 
     void cleanup()
     {
         // リソースの破棄と作成の順序は正確に逆にする必要がある
+
+        // 同期オブジェクトを破棄する前にGPU操作が完了していることを確認、そうでないとエラーになる
+        vkDestroySemaphore(device, renderFinishedSemaphore, nullptr);
+        vkDestroySemaphore(device, imageAvailableSemaphore, nullptr);
+        vkDestroyFence(device, inFlightFence, nullptr);
 
         vkDestroyCommandPool(device, commandPool, nullptr);
 
@@ -747,12 +762,30 @@ private:
         subpass.colorAttachmentCount = 1;
         subpass.pColorAttachments = &colorAttachmentRef;
 
+        // subpass dependencyは自動的にLayout Transition（レイアウト変換）を制御するために使用され、GPUが異なる操作段階でデータに効率的にアクセスできるように最適化する
+        // subpass dependencyも競合を避けるために同期が必要
+        // subpassが1つしかない場合、subpassの前後の操作は暗黙的な(impicit)subpassと見なされる
+        VkSubpassDependency dependency{};
+        dependency.srcSubpass = VK_SUBPASS_EXTERNAL; // 暗黙的な(impicit)subpass
+        dependency.dstSubpass = 0; // 最初のsubpass
+
+        // サブパス0のカラーアタッチメント書き込み操作がスワップチェーンイメージの準備完了前に実行されないようにする
+        dependency.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+        dependency.srcAccessMask = 0;
+
+        // カラーアタッチメント出力ステージでのみ待機が必要で、それ以前の作業は先に完了できる
+        dependency.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+        // 書き込み権限を宣言し、競合を防止
+        dependency.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+
         VkRenderPassCreateInfo renderPassInfo{};
         renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
         renderPassInfo.attachmentCount = 1;
         renderPassInfo.pAttachments = &colorAttachment;
         renderPassInfo.subpassCount = 1;
         renderPassInfo.pSubpasses = &subpass;
+        renderPassInfo.dependencyCount = 1;
+        renderPassInfo.pDependencies = &dependency;
 
         if (vkCreateRenderPass(device, &renderPassInfo, nullptr, &renderPass) != VK_SUCCESS)
         {
@@ -1026,6 +1059,77 @@ private:
         }
     }
 
+    void createSyncObjects() 
+    {
+        VkSemaphoreCreateInfo semaphoreInfo{};
+        semaphoreInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+
+        VkFenceCreateInfo fenceInfo{};
+        fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+        fenceInfo.flags = VK_FENCE_CREATE_SIGNALED_BIT; // 初期状態での無限待機を防止するため
+
+        if (vkCreateSemaphore(device, &semaphoreInfo, nullptr, &imageAvailableSemaphore) != VK_SUCCESS ||
+            vkCreateSemaphore(device, &semaphoreInfo, nullptr, &renderFinishedSemaphore) != VK_SUCCESS ||
+            vkCreateFence(device, &fenceInfo, nullptr, &inFlightFence) != VK_SUCCESS) 
+        {
+            throw runtime_error("failed to create synchronization objects for a frame!");
+        }
+
+    }
+
+    void drawFrame() 
+    {
+        // CPUとGPU間の同期、前のフレームのレンダリングが完了するのを待ってから現在のフレームをレンダリング
+        vkWaitForFences(device, 1, &inFlightFence, VK_TRUE, UINT64_MAX);
+        vkResetFences(device, 1, &inFlightFence); // 次の同期のために手動でunsignaled状態にリセットする必要がある
+
+        // スワップチェーンから次のレンダリング対象イメージを取得（現在は1つのみ）、イメージ取得に成功するとimageAvailableSemaphoreシグナルが発行される
+        uint32_t imageIndex;
+        vkAcquireNextImageKHR(device, swapChain, UINT64_MAX, imageAvailableSemaphore, VK_NULL_HANDLE, &imageIndex);
+
+        // CommandBufferにコマンドを書き込む
+        vkResetCommandBuffer(commandBuffer, /*VkCommandBufferResetFlagBits*/ 0);
+        recordCommandBuffer(commandBuffer, imageIndex);
+
+        // コマンドキューの送信情報
+        VkSubmitInfo submitInfo{};
+        submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+
+        // レンダリングコマンドはimageAvailableSemaphoreの解放を待つ必要がある、つまりスワップチェーンがレンダリング対象イメージを取得するのを待つ
+        VkSemaphore waitSemaphores[] = { imageAvailableSemaphore }; 
+        // カラーアタッチメント出力ステージでのみ待機が必要で、それ以前の作業は先に完了できる
+        VkPipelineStageFlags waitStages[] = { VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT }; 
+        submitInfo.waitSemaphoreCount = 1;
+        submitInfo.pWaitSemaphores = waitSemaphores;
+        submitInfo.pWaitDstStageMask = waitStages;
+
+        submitInfo.commandBufferCount = 1;
+        submitInfo.pCommandBuffers = &commandBuffer;
+
+        // レンダリングコマンドが完了すると、renderFinishedSemaphoreが発行され、レンダリング完了を示す
+        VkSemaphore signalSemaphores[] = { renderFinishedSemaphore };
+        submitInfo.signalSemaphoreCount = 1;
+        submitInfo.pSignalSemaphores = signalSemaphores;
+
+        if (vkQueueSubmit(graphicsQueue, 1, &submitInfo, inFlightFence) != VK_SUCCESS) {
+            throw runtime_error("failed to submit draw command buffer!");
+        }
+
+        VkPresentInfoKHR presentInfo{};
+        presentInfo.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
+
+        presentInfo.waitSemaphoreCount = 1;
+        // イメージの表示はrenderFinishedSemaphoreを待つ必要がある、つまりレンダリング完了を待つ
+        presentInfo.pWaitSemaphores = signalSemaphores;
+
+        VkSwapchainKHR swapChains[] = { swapChain };
+        presentInfo.swapchainCount = 1;
+        presentInfo.pSwapchains = swapChains;
+
+        presentInfo.pImageIndices = &imageIndex;
+
+        vkQueuePresentKHR(presentQueue, &presentInfo);
+    }
 
 };
 
