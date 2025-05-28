@@ -22,6 +22,12 @@ using namespace std;
 const uint32_t WIDTH = 800;
 const uint32_t HEIGHT = 600;
 
+// 適切な並列フレーム数を設定することでGPU負荷を最適化
+// 並列フレーム数が多すぎるとGPU負荷過大、フレーム遅延(latency)増加
+// 並列フレーム数が少なすぎるとGPU利用率低下、フレームレート低下
+// この値は負荷に基づき動的に計算可能
+const int MAX_FRAMES_IN_FLIGHT = 2; 
+
 const vector<const char*> requiredLayers =
 {
     "VK_LAYER_KHRONOS_validation" // VK_LAYER_KHRONOS_validationで暗黙的にすべての検証レイヤーを有効化
@@ -91,13 +97,14 @@ private:
     VkRenderPass renderPass;
     VkPipeline graphicsPipeline;
     vector<VkFramebuffer> swapChainFramebuffers;  // 1つのattachmentが複数のswapchain画像に対応する可能性があるため、複数のframebufferが必要
-    VkCommandPool commandPool;
-    VkCommandBuffer commandBuffer;
+    VkCommandPool commandPool; // Command Pool 是一个‌内存管理容器‌，用于分配和管理 Command Buffer
+    vector <VkCommandBuffer> commandBuffers; // Command Buffer 是‌存储 GPU 命令的容器‌，用于记录渲染、计算或内存操作等指令
 
     // VulkanのAPI呼び出しの大部分は非同期であるため、明示的に同期を実装する必要があります
-    VkSemaphore imageAvailableSemaphore; // GPU内の各コマンド間の同期を実現
-    VkSemaphore renderFinishedSemaphore; // GPU内の各コマンド間の同期を実現
-    VkFence inFlightFence; // CPUとGPU間の同期を実現
+    vector <VkSemaphore> imageAvailableSemaphores; // GPU内の各コマンド間の同期を実現
+    vector <VkSemaphore> renderFinishedSemaphores; // GPU内の各コマンド間の同期を実現
+    vector <VkFence> inFlightFences; // CPUとGPU間の同期を実現
+    uint32_t currentFrame = 0; // 识别当前渲染的是并行帧的哪一帧
 
     void initWindow()
     {
@@ -122,7 +129,7 @@ private:
         createGraphicsPipeline();
         createFramebuffers();
         createCommandPool();
-        createCommandBuffer();
+        createCommandBuffers();
         createSyncObjects();
     }
 
@@ -165,9 +172,12 @@ private:
         // リソースの破棄と作成の順序は正確に逆にする必要がある
 
         // 同期オブジェクトを破棄する前にGPU操作が完了していることを確認、そうでないとエラーになる
-        vkDestroySemaphore(device, renderFinishedSemaphore, nullptr);
-        vkDestroySemaphore(device, imageAvailableSemaphore, nullptr);
-        vkDestroyFence(device, inFlightFence, nullptr);
+        for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) 
+        {
+            vkDestroySemaphore(device, renderFinishedSemaphores[i], nullptr);
+            vkDestroySemaphore(device, imageAvailableSemaphores[i], nullptr);
+            vkDestroyFence(device, inFlightFences[i], nullptr);
+        }
 
         vkDestroyCommandPool(device, commandPool, nullptr);
 
@@ -994,15 +1004,17 @@ private:
         }
     }
 
-    void createCommandBuffer() 
+    void createCommandBuffers() 
     {
+        commandBuffers.resize(MAX_FRAMES_IN_FLIGHT);
+
         VkCommandBufferAllocateInfo allocInfo{};
         allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
         allocInfo.commandPool = commandPool;
         allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY; // キューに直接投入可能（他のコマンドバッファから呼び出し不可）
-        allocInfo.commandBufferCount = 1;
+        allocInfo.commandBufferCount = (uint32_t)commandBuffers.size();;
 
-        if (vkAllocateCommandBuffers(device, &allocInfo, &commandBuffer) != VK_SUCCESS) 
+        if (vkAllocateCommandBuffers(device, &allocInfo, commandBuffers.data()) != VK_SUCCESS)
         {
             throw runtime_error("failed to allocate command buffers!");
         }
@@ -1061,6 +1073,10 @@ private:
 
     void createSyncObjects() 
     {
+        imageAvailableSemaphores.resize(MAX_FRAMES_IN_FLIGHT);
+        renderFinishedSemaphores.resize(MAX_FRAMES_IN_FLIGHT);
+        inFlightFences.resize(MAX_FRAMES_IN_FLIGHT);
+
         VkSemaphoreCreateInfo semaphoreInfo{};
         semaphoreInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
 
@@ -1068,11 +1084,14 @@ private:
         fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
         fenceInfo.flags = VK_FENCE_CREATE_SIGNALED_BIT; // 初期状態での無限待機を防止するため
 
-        if (vkCreateSemaphore(device, &semaphoreInfo, nullptr, &imageAvailableSemaphore) != VK_SUCCESS ||
-            vkCreateSemaphore(device, &semaphoreInfo, nullptr, &renderFinishedSemaphore) != VK_SUCCESS ||
-            vkCreateFence(device, &fenceInfo, nullptr, &inFlightFence) != VK_SUCCESS) 
+        for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) 
         {
-            throw runtime_error("failed to create synchronization objects for a frame!");
+            if (vkCreateSemaphore(device, &semaphoreInfo, nullptr, &imageAvailableSemaphores[i]) != VK_SUCCESS ||
+                vkCreateSemaphore(device, &semaphoreInfo, nullptr, &renderFinishedSemaphores[i]) != VK_SUCCESS ||
+                vkCreateFence(device, &fenceInfo, nullptr, &inFlightFences[i]) != VK_SUCCESS) 
+            {
+                throw runtime_error("failed to create synchronization objects for a frame!");
+            }
         }
 
     }
@@ -1080,23 +1099,23 @@ private:
     void drawFrame() 
     {
         // CPUとGPU間の同期、前のフレームのレンダリングが完了するのを待ってから現在のフレームをレンダリング
-        vkWaitForFences(device, 1, &inFlightFence, VK_TRUE, UINT64_MAX);
-        vkResetFences(device, 1, &inFlightFence); // 次の同期のために手動でunsignaled状態にリセットする必要がある
+        vkWaitForFences(device, 1, &inFlightFences[currentFrame], VK_TRUE, UINT64_MAX);
+        vkResetFences(device, 1, &inFlightFences[currentFrame]); // 次の同期のために手動でunsignaled状態にリセットする必要がある
 
         // スワップチェーンから次のレンダリング対象イメージを取得（現在は1つのみ）、イメージ取得に成功するとimageAvailableSemaphoreシグナルが発行される
         uint32_t imageIndex;
-        vkAcquireNextImageKHR(device, swapChain, UINT64_MAX, imageAvailableSemaphore, VK_NULL_HANDLE, &imageIndex);
+        vkAcquireNextImageKHR(device, swapChain, UINT64_MAX, imageAvailableSemaphores[currentFrame], VK_NULL_HANDLE, &imageIndex);
 
         // CommandBufferにコマンドを書き込む
-        vkResetCommandBuffer(commandBuffer, /*VkCommandBufferResetFlagBits*/ 0);
-        recordCommandBuffer(commandBuffer, imageIndex);
+        vkResetCommandBuffer(commandBuffers[currentFrame], /*VkCommandBufferResetFlagBits*/ 0);
+        recordCommandBuffer(commandBuffers[currentFrame], imageIndex);
 
         // コマンドキューの送信情報
         VkSubmitInfo submitInfo{};
         submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
 
         // レンダリングコマンドはimageAvailableSemaphoreの解放を待つ必要がある、つまりスワップチェーンがレンダリング対象イメージを取得するのを待つ
-        VkSemaphore waitSemaphores[] = { imageAvailableSemaphore }; 
+        VkSemaphore waitSemaphores[] = { imageAvailableSemaphores[currentFrame] };
         // カラーアタッチメント出力ステージでのみ待機が必要で、それ以前の作業は先に完了できる
         VkPipelineStageFlags waitStages[] = { VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT }; 
         submitInfo.waitSemaphoreCount = 1;
@@ -1104,14 +1123,14 @@ private:
         submitInfo.pWaitDstStageMask = waitStages;
 
         submitInfo.commandBufferCount = 1;
-        submitInfo.pCommandBuffers = &commandBuffer;
+        submitInfo.pCommandBuffers = &commandBuffers[currentFrame];
 
         // レンダリングコマンドが完了すると、renderFinishedSemaphoreが発行され、レンダリング完了を示す
-        VkSemaphore signalSemaphores[] = { renderFinishedSemaphore };
+        VkSemaphore signalSemaphores[] = { renderFinishedSemaphores[currentFrame] };
         submitInfo.signalSemaphoreCount = 1;
         submitInfo.pSignalSemaphores = signalSemaphores;
 
-        if (vkQueueSubmit(graphicsQueue, 1, &submitInfo, inFlightFence) != VK_SUCCESS) {
+        if (vkQueueSubmit(graphicsQueue, 1, &submitInfo, inFlightFences[currentFrame]) != VK_SUCCESS) {
             throw runtime_error("failed to submit draw command buffer!");
         }
 
@@ -1129,6 +1148,8 @@ private:
         presentInfo.pImageIndices = &imageIndex;
 
         vkQueuePresentKHR(presentQueue, &presentInfo);
+
+        currentFrame = (currentFrame + 1) % MAX_FRAMES_IN_FLIGHT;
     }
 
 };
