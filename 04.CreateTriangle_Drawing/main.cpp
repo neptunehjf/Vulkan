@@ -97,24 +97,35 @@ private:
     VkRenderPass renderPass;
     VkPipeline graphicsPipeline;
     vector<VkFramebuffer> swapChainFramebuffers;  // 1つのattachmentが複数のswapchain画像に対応する可能性があるため、複数のframebufferが必要
-    VkCommandPool commandPool; // Command Pool 是一个‌内存管理容器‌，用于分配和管理 Command Buffer
-    vector <VkCommandBuffer> commandBuffers; // Command Buffer 是‌存储 GPU 命令的容器‌，用于记录渲染、计算或内存操作等指令
+    VkCommandPool commandPool; // コマンドプールはCommand Bufferの割り当て・管理用メモリコンテナ
+    vector <VkCommandBuffer> commandBuffers; // Command BufferはGPUコマンド格納用コンテナ（描画/計算/メモリ操作命令記録用）
 
     // VulkanのAPI呼び出しの大部分は非同期であるため、明示的に同期を実装する必要があります
     vector <VkSemaphore> imageAvailableSemaphores; // GPU内の各コマンド間の同期を実現
     vector <VkSemaphore> renderFinishedSemaphores; // GPU内の各コマンド間の同期を実現
     vector <VkFence> inFlightFences; // CPUとGPU間の同期を実現
-    uint32_t currentFrame = 0; // 识别当前渲染的是并行帧的哪一帧
+    uint32_t currentFrame = 0; // 現在処理中の並列フレームを識別
+
+    bool framebufferResized = false;
 
     void initWindow()
     {
         glfwInit();
 
         glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API); // GLFWが自動的にOpenGLコンテキストを作成しないように設定する
-        glfwWindowHint(GLFW_RESIZABLE, GLFW_FALSE);
 
         window = glfwCreateWindow(WIDTH, HEIGHT, "koalahjf@gmail.com", nullptr, nullptr);
+        glfwSetWindowUserPointer(window, this);
+        glfwSetFramebufferSizeCallback(window, framebufferResizeCallback);
     }
+
+    // VK_ERROR_OUT_OF_DATE_KHRはリサイズ発生を保証しないため、glfwSetFramebufferSizeCallbackで明示的に処理する必要がある
+    static void framebufferResizeCallback(GLFWwindow* window, int width, int height) 
+    {
+        auto app = reinterpret_cast<HelloTriangleApplication*>(glfwGetWindowUserPointer(window));
+        app->framebufferResized = true;
+    }
+
 
     void initVulkan()
     {
@@ -167,9 +178,25 @@ private:
         vkDeviceWaitIdle(device); 
     }
 
+    void cleanupSwapChain() 
+    {
+        for (auto framebuffer : swapChainFramebuffers) 
+        {
+            vkDestroyFramebuffer(device, framebuffer, nullptr);
+        }
+
+        for (auto imageView : swapChainImageViews) 
+        {
+            vkDestroyImageView(device, imageView, nullptr);
+        }
+
+        vkDestroySwapchainKHR(device, swapChain, nullptr);
+    }
+
     void cleanup()
     {
         // リソースの破棄と作成の順序は正確に逆にする必要がある
+        cleanupSwapChain();
 
         // 同期オブジェクトを破棄する前にGPU操作が完了していることを確認、そうでないとエラーになる
         for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) 
@@ -181,23 +208,11 @@ private:
 
         vkDestroyCommandPool(device, commandPool, nullptr);
 
-        for (auto framebuffer : swapChainFramebuffers)
-        {
-            vkDestroyFramebuffer(device, framebuffer, nullptr);
-        }
-
         vkDestroyPipeline(device, graphicsPipeline, nullptr);
 
         vkDestroyPipelineLayout(device, pipelineLayout, nullptr);
 
         vkDestroyRenderPass(device, renderPass, nullptr);
-
-        for (auto imageView : swapChainImageViews)
-        {
-            vkDestroyImageView(device, imageView, nullptr);
-        }
-
-        vkDestroySwapchainKHR(device, swapChain, nullptr);
 
         vkDestroyDevice(device, nullptr);
 
@@ -211,6 +226,29 @@ private:
         glfwDestroyWindow(window);
 
         glfwTerminate();
+    }
+
+    void recreateSwapChain() 
+    {
+        int width = 0, height = 0;
+        glfwGetFramebufferSize(window, &width, &height);
+
+        // ウィンドウが最小化されている場合、復元するまで待機
+        while (width == 0 || height == 0) 
+        {
+            glfwGetFramebufferSize(window, &width, &height);
+            glfwWaitEvents();
+        }
+
+        // GPU処理完了を待ってからクリーンアップ
+        vkDeviceWaitIdle(device);
+
+        cleanupSwapChain();
+
+        // スワップチェーンの再作成
+        createSwapChain();
+        createImageViews();
+        createFramebuffers();
     }
 
     void createInstance()
@@ -705,7 +743,8 @@ private:
         createInfo.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR; // ウィンドウ間のブレンド
         createInfo.presentMode = presentMode;
         createInfo.clipped = VK_TRUE; // Ⅴulkanには、他のウィンドウに隠れたピクセルを最適化可能
-        createInfo.oldSwapchain = VK_NULL_HANDLE; // スワップチェーンのリビルド用、暫定VK_NULL_HANDLE
+        createInfo.oldSwapchain = VK_NULL_HANDLE; // スワップチェーンの再構築用、暫定VK_NULL_HANDLE
+                                                  // 再構築前のスワップチェーンを指定するとパフォーマンス向上
 
 
         // スワップチェーン作成
@@ -1100,11 +1139,27 @@ private:
     {
         // CPUとGPU間の同期、前のフレームのレンダリングが完了するのを待ってから現在のフレームをレンダリング
         vkWaitForFences(device, 1, &inFlightFences[currentFrame], VK_TRUE, UINT64_MAX);
-        vkResetFences(device, 1, &inFlightFences[currentFrame]); // 次の同期のために手動でunsignaled状態にリセットする必要がある
 
         // スワップチェーンから次のレンダリング対象イメージを取得（現在は1つのみ）、イメージ取得に成功するとimageAvailableSemaphoreシグナルが発行される
         uint32_t imageIndex;
-        vkAcquireNextImageKHR(device, swapChain, UINT64_MAX, imageAvailableSemaphores[currentFrame], VK_NULL_HANDLE, &imageIndex);
+        VkResult result = vkAcquireNextImageKHR(device, swapChain, UINT64_MAX, imageAvailableSemaphores[currentFrame], VK_NULL_HANDLE, &imageIndex);
+
+        // ウィンドウサイズ変更後は通常VK_ERROR_OUT_OF_DATE_KHRエラーが発生し、スワップチェーン再構築が必要
+        if (result == VK_ERROR_OUT_OF_DATE_KHR) 
+        {
+            recreateSwapChain();
+            return;
+        }
+        else if (result != VK_SUCCESS && result != VK_SUBOPTIMAL_KHR)  // VK_SUBOPTIMAL_KHRの場合もスワップチェーン使用可能
+        {
+            throw runtime_error("failed to acquire swap chain image!");
+        }
+
+        // 次の同期のために手動でunsignaled状態にリセットする必要がある
+        // vkResetFencesはif (result == VK_ERROR_OUT_OF_DATE_KHR) 分岐後に配置すること
+        // そうしないとレンダリングコマンド未提交により、GPUを待つことが永久化する
+        vkResetFences(device, 1, &inFlightFences[currentFrame]); 
+
 
         // CommandBufferにコマンドを書き込む
         vkResetCommandBuffer(commandBuffers[currentFrame], /*VkCommandBufferResetFlagBits*/ 0);
@@ -1147,7 +1202,17 @@ private:
 
         presentInfo.pImageIndices = &imageIndex;
 
-        vkQueuePresentKHR(presentQueue, &presentInfo);
+        result = vkQueuePresentKHR(presentQueue, &presentInfo);
+
+        if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_SUBOPTIMAL_KHR || framebufferResized) 
+        {
+            framebufferResized = false;
+            recreateSwapChain();
+        }
+        else if (result != VK_SUCCESS) 
+        {
+            throw runtime_error("failed to present swap chain image!");
+        }
 
         currentFrame = (currentFrame + 1) % MAX_FRAMES_IN_FLIGHT;
     }
