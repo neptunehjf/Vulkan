@@ -81,9 +81,9 @@ struct Vertex
     }
 };
 
-const vector<Vertex> vertices = 
+const std::vector<Vertex> vertices = 
 {
-    {{0.0f, -0.5f}, {1.0f, 0.0f, 0.0f}},
+    {{0.0f, -0.5f}, {1.0f, 1.0f, 1.0f}},
     {{0.5f, 0.5f}, {0.0f, 1.0f, 0.0f}},
     {{-0.5f, 0.5f}, {0.0f, 0.0f, 1.0f}}
 };
@@ -142,6 +142,10 @@ private:
     VkPipeline graphicsPipeline;
     vector<VkFramebuffer> swapChainFramebuffers;  // 1つのattachmentが複数のswapchain画像に対応する可能性があるため、複数のframebufferが必要
     VkCommandPool commandPool; // コマンドプールはCommand Bufferの割り当て・管理用メモリコンテナ
+    
+    VkBuffer vertexBuffer; // 論理バッファオブジェクト バッファの論理属性と用途を定義
+    VkDeviceMemory vertexBufferMemory; // 実際のメモリ割り当てと管理（VRAMまたはホストメモリ）、データ格納
+    
     vector <VkCommandBuffer> commandBuffers; // Command BufferはGPUコマンド格納用コンテナ（描画/計算/メモリ操作命令記録用）
 
     // VulkanのAPI呼び出しの大部分は非同期であるため、明示的に同期を実装する必要があります
@@ -184,6 +188,7 @@ private:
         createGraphicsPipeline();
         createFramebuffers();
         createCommandPool();
+        createVertexBuffer();
         createCommandBuffers();
         createSyncObjects();
     }
@@ -249,6 +254,9 @@ private:
             vkDestroySemaphore(device, imageAvailableSemaphores[i], nullptr);
             vkDestroyFence(device, inFlightFences[i], nullptr);
         }
+
+        vkDestroyBuffer(device, vertexBuffer, nullptr);
+        vkFreeMemory(device, vertexBufferMemory, nullptr);
 
         vkDestroyCommandPool(device, commandPool, nullptr);
 
@@ -1093,6 +1101,71 @@ private:
         }
     }
 
+    void createVertexBuffer() 
+    {
+        VkBufferCreateInfo bufferInfo{};
+        bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+        bufferInfo.size = sizeof(vertices[0]) * vertices.size();
+        bufferInfo.usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT; // バッファの用途指定（頂点データ格納用）
+        bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE; // swapchainと同様、バッファもEXCLUSIVE/CONCURRENTを指定可能
+                                                            // 本バッファは1つのキュー（graphics queue）のみで使用するためEXCLUSIVEが適切
+
+        if (vkCreateBuffer(device, &bufferInfo, nullptr, &vertexBuffer) != VK_SUCCESS) 
+        {
+            throw runtime_error("failed to create vertex buffer!");
+        }
+
+        VkMemoryRequirements memRequirements;
+        vkGetBufferMemoryRequirements(device, vertexBuffer, &memRequirements);
+
+        VkMemoryAllocateInfo allocInfo{};
+        allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+        allocInfo.allocationSize = memRequirements.size;
+
+        // memoryTypeとpropertiesに対応するmemoryTypeIndexを検索
+        // HOST_VISIBLE: CPUがこのメモリ（VRAM）にアクセス可能
+        // HOST_COHERENT: CPUとGPUのメモリアクセスで自動的にキャッシュ一貫性（Cache Coherency）を維持
+        // map -> copy -> unmap時、CPUとGPUのデータがキャッシュ原因で不一致になる可能性あり
+        //
+        // HOST_COHERENT未使用時は以下で対応可能
+        // vkFlushMappedMemoryRanges: CPU書き込み後、データをCPUキャッシュからGPU可視領域へフラッシュ
+        // vkInvalidateMappedMemoryRanges: CPU読み取り前、GPU書き込みデータをデバイスキャッシュからCPU可視領域へ同期
+        //
+        // ※キャッシュ一貫性維持は性能低下要因となる場合あり
+        // 
+        // HOST:CPU / DEVICE:GPU
+
+        allocInfo.memoryTypeIndex = findMemoryType(memRequirements.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+
+        if (vkAllocateMemory(device, &allocInfo, nullptr, &vertexBufferMemory) != VK_SUCCESS) 
+        {
+            throw runtime_error("failed to allocate vertex buffer memory!");
+        }
+
+        vkBindBufferMemory(device, vertexBuffer, vertexBufferMemory, 0);
+
+        void* data;
+        vkMapMemory(device, vertexBufferMemory, 0, bufferInfo.size, 0, &data);
+        memcpy(data, vertices.data(), (size_t)bufferInfo.size);
+        vkUnmapMemory(device, vertexBufferMemory); // unmap時はキャッシュ一貫性に注意
+    }
+
+    uint32_t findMemoryType(uint32_t typeFilter, VkMemoryPropertyFlags properties) 
+    {
+        VkPhysicalDeviceMemoryProperties memProperties;
+        vkGetPhysicalDeviceMemoryProperties(physicalDevice, &memProperties);
+
+        for (uint32_t i = 0; i < memProperties.memoryTypeCount; i++) 
+        {
+            if ((typeFilter & (1 << i)) && (memProperties.memoryTypes[i].propertyFlags & properties) == properties) 
+            {
+                return i;
+            }
+        }
+
+        throw runtime_error("failed to find suitable memory type!");
+    }
+
     void createCommandBuffers() 
     {
         commandBuffers.resize(MAX_FRAMES_IN_FLIGHT);
@@ -1150,7 +1223,11 @@ private:
         scissor.extent = swapChainExtent;
         vkCmdSetScissor(commandBuffer, 0, 1, &scissor);
 
-        vkCmdDraw(commandBuffer, 3, 1, 0, 0); // 描画コマンド（頂点3つ、インスタンス化なし）
+        VkBuffer vertexBuffers[] = { vertexBuffer };
+        VkDeviceSize offsets[] = { 0 };
+        vkCmdBindVertexBuffers(commandBuffer, 0, 1, vertexBuffers, offsets);
+
+        vkCmdDraw(commandBuffer, static_cast<uint32_t>(vertices.size()), 1, 0, 0);
 
         vkCmdEndRenderPass(commandBuffer);
 
