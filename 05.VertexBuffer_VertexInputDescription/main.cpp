@@ -83,9 +83,15 @@ struct Vertex
 
 const vector<Vertex> vertices = 
 {
-    {{0.0f, -0.5f}, {1.0f, 1.0f, 1.0f}},
-    {{0.5f, 0.5f}, {0.0f, 1.0f, 0.0f}},
-    {{-0.5f, 0.5f}, {0.0f, 0.0f, 1.0f}}
+    {{-0.5f, -0.5f}, {1.0f, 0.0f, 0.0f}},
+    {{0.5f, -0.5f}, {0.0f, 1.0f, 0.0f}},
+    {{0.5f, 0.5f}, {0.0f, 0.0f, 1.0f}},
+    {{-0.5f, 0.5f}, {1.0f, 1.0f, 1.0f}}
+};
+
+const vector<uint16_t> indices = 
+{
+    0, 1, 2, 2, 3, 0
 };
 
 
@@ -145,6 +151,8 @@ private:
     
     VkBuffer vertexBuffer; // 論理バッファオブジェクト バッファの論理属性と用途を定義
     VkDeviceMemory vertexBufferMemory; // 実際のメモリ割り当てと管理（VRAMまたはホストメモリ）、データ格納
+    VkBuffer indexBuffer;  // / vertexBufferと同様だが、インデックスバッファは1つしか持たず、そのインデックス値は全ての頂点属性（位置、法線、UV座標など）に適用される
+    VkDeviceMemory indexBufferMemory;
     
     vector <VkCommandBuffer> commandBuffers; // Command BufferはGPUコマンド格納用コンテナ（描画/計算/メモリ操作命令記録用）
 
@@ -189,6 +197,7 @@ private:
         createFramebuffers();
         createCommandPool();
         createVertexBuffer();
+        createIndexBuffer();
         createCommandBuffers();
         createSyncObjects();
     }
@@ -254,6 +263,9 @@ private:
             vkDestroySemaphore(device, imageAvailableSemaphores[i], nullptr);
             vkDestroyFence(device, inFlightFences[i], nullptr);
         }
+
+        vkDestroyBuffer(device, indexBuffer, nullptr);
+        vkFreeMemory(device, indexBufferMemory, nullptr);
 
         vkDestroyBuffer(device, vertexBuffer, nullptr);
         vkFreeMemory(device, vertexBufferMemory, nullptr);
@@ -1174,6 +1186,29 @@ private:
         vkBindBufferMemory(device, buffer, bufferMemory, 0);
     }
 
+    // 理論上、index bufferはvertex bufferと同じbufferを共有でき（offsetで区別）、メモリの冗長性を削減可能
+    // ここでは簡略化のため2つのbufferに分離
+    void createIndexBuffer() 
+    {
+        VkDeviceSize bufferSize = sizeof(indices[0]) * indices.size();
+
+        VkBuffer stagingBuffer;
+        VkDeviceMemory stagingBufferMemory;
+        createBuffer(bufferSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, stagingBuffer, stagingBufferMemory);
+
+        void* data;
+        vkMapMemory(device, stagingBufferMemory, 0, bufferSize, 0, &data);
+        memcpy(data, indices.data(), (size_t)bufferSize);
+        vkUnmapMemory(device, stagingBufferMemory);
+
+        createBuffer(bufferSize, VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, indexBuffer, indexBufferMemory);
+
+        copyBuffer(stagingBuffer, indexBuffer, bufferSize);
+
+        vkDestroyBuffer(device, stagingBuffer, nullptr);
+        vkFreeMemory(device, stagingBufferMemory, nullptr);
+    }
+
     // staging bufferからvertex bufferへのコピーはGPU内部で行われるため、vkCmdCopyBufferコマンドをキューに登録する必要がある
     void copyBuffer(VkBuffer srcBuffer, VkBuffer dstBuffer, VkDeviceSize size) 
     {
@@ -1288,7 +1323,9 @@ private:
         VkDeviceSize offsets[] = { 0 };
         vkCmdBindVertexBuffers(commandBuffer, 0, 1, vertexBuffers, offsets);
 
-        vkCmdDraw(commandBuffer, static_cast<uint32_t>(vertices.size()), 1, 0, 0);
+        vkCmdBindIndexBuffer(commandBuffer, indexBuffer, 0, VK_INDEX_TYPE_UINT16);
+
+        vkCmdDrawIndexed(commandBuffer, static_cast<uint32_t>(indices.size()), 1, 0, 0, 0);
 
         vkCmdEndRenderPass(commandBuffer);
 
